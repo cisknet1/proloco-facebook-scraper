@@ -1,0 +1,17 @@
+{
+  "name": "proloco-facebook-scraper",
+  "version": "1.0.0",
+  "description": "Scraper pagine Facebook Pro Loco italiane — posts + events con filtro date",
+  "type": "module",
+  "main": "main.js",
+  "scripts": {
+    "start": "node main.js"
+  },
+  "dependencies": {
+    "apify": "^3.2.0",
+    "crawlee": "^3.5.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

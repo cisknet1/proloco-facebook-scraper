@@ -1,0 +1,13 @@
+{
+  "title": "ProLoco Facebook Scraper Input",
+  "type": "object",
+  "schemaVersion": 1,
+  "properties": {
+    "fbUrl":     {"title": "URL pagina Facebook", "type": "string", "editor": "textfield"},
+    "comune":    {"title": "Nome comune",          "type": "string", "editor": "textfield"},
+    "fromDate":  {"title": "Data da YYYY-MM-DD",   "type": "string", "editor": "textfield"},
+    "toDate":    {"title": "Data a YYYY-MM-DD",    "type": "string", "editor": "textfield"},
+    "maxPosts":  {"title": "Max post",             "type": "integer","default": 20, "editor": "number"}
+  },
+  "required": ["fbUrl", "comune"]
+}

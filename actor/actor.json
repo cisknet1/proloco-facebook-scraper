@@ -1,0 +1,8 @@
+{
+  "actorSpecification": 1,
+  "name": "proloco-facebook-scraper",
+  "title": "ProLoco Facebook Scraper",
+  "description": "Scrapa posts ed eventi da pagine Facebook Pro Loco e Comuni italiani",
+  "version": "1.0",
+  "buildTag": "latest"
+}
