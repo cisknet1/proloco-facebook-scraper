@@ -96,6 +96,8 @@ const crawler = new CheerioCrawler({
                 log.warning(`Non pertinente: "${title}" — stop`);
             } else {
                 log.info(`Valida: "${title}"`);
+                // Aggiungi lista eventi SOLO dopo conferma pertinenza
+                await crawler.addRequests([{ url: eventsUrl }]);
             }
             return;
         }
@@ -160,11 +162,8 @@ const crawler = new CheerioCrawler({
     },
 });
 
-// Avvia da pagina principale + lista eventi
-await crawler.run([
-    { url: baseUrl },
-    { url: eventsUrl },
-]);
+// Avvia SOLO dalla pagina principale — events aggiunto dopo validazione
+await crawler.run([{ url: baseUrl }]);
 
 log.info(`\n✅ ${comune}: pertinente=${results.isRelevant} | eventi=${results.events.length}`);
 if (results.events.length > 0) {
