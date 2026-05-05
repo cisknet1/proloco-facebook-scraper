@@ -1,19 +1,18 @@
 /**
- * ProLoco Facebook Events Scraper
- * Legge eventi pubblici da pagina Facebook Pro Loco/Comune
- * Filtra per data direttamente in JS — zero sprechi
- * Gli eventi FB sono sempre pubblici, non richiedono login
+ * ProLoco Facebook Events Scraper — Playwright
+ * Usa browser reale per vedere eventi caricati via JavaScript
+ * Proxy residenziale italiano per bypassare blocchi Facebook
  *
  * Input:
  *   fbUrl:     URL pagina Facebook
- *   comune:    Nome comune (per validazione pertinenza)
+ *   comune:    Nome comune
  *   fromDate:  Data minima eventi YYYY-MM-DD (default: oggi)
  *   toDate:    Data massima eventi YYYY-MM-DD (default: oggi + 90gg)
  *   maxEvents: Max eventi da raccogliere (default: 15)
  */
 
 import { Actor } from 'apify';
-import { CheerioCrawler, Dataset, log, ProxyConfiguration } from 'crawlee';
+import { PlaywrightCrawler, Dataset, log } from 'crawlee';
 
 await Actor.init();
 
@@ -37,18 +36,14 @@ const comuneLow  = comune.toLowerCase();
 const baseUrl    = fbUrl.replace(/\/$/, '');
 const eventsUrl  = baseUrl + '/events/';
 
-log.info(`Scraping eventi: ${baseUrl}`);
-log.info(`Comune: ${comune} | Dal: ${fromDate} | Al: ${toDate} | Max: ${maxEvents}`);
+log.info(`Scraping: ${baseUrl} | ${comune} | ${fromDate} → ${toDate}`);
 
 const results = {
-    fbUrl:      baseUrl,
-    comune,
-    pageTitle:  '',
-    isRelevant: false,
-    events:     [],
+    fbUrl: baseUrl, comune,
+    pageTitle: '', isRelevant: false,
+    events: [],
 };
 
-// ── Helpers ────────────────────────────────────────────────────────────────
 function parseDate(str) {
     if (!str) return null;
     try { return new Date(str); } catch { return null; }
@@ -69,91 +64,130 @@ function isPageRelevant(title) {
     return hasKeyword || hasComune;
 }
 
-// ── Proxy residenziale italiano ────────────────────────────────────────────
+// Proxy residenziale italiano
 const proxyConfig = await Actor.createProxyConfiguration({
     groups: ['RESIDENTIAL'],
     countryCode: 'IT',
 });
 
-// ── Crawler ────────────────────────────────────────────────────────────────
-const crawler = new CheerioCrawler({
+const crawler = new PlaywrightCrawler({
     proxyConfiguration: proxyConfig,
-    maxRequestsPerCrawl: 80,
-    requestHandlerTimeoutSecs: 30,
-    maxConcurrency: 2,
+    maxRequestsPerCrawl: 50,
+    requestHandlerTimeoutSecs: 60,
+    maxConcurrency: 1,
+    launchContext: {
+        launchOptions: {
+            headless: true,
+            args: ['--no-sandbox', '--disable-dev-shm-usage'],
+        },
+    },
 
-    async requestHandler({ $, request }) {
+    async requestHandler({ page, request }) {
         const url = request.url;
         log.info(`Pagina: ${url}`);
 
+        // Accetta cookie se appare il banner
+        try {
+            const cookieBtn = page.locator('[data-cookiebanner="accept_button"], button:has-text("Accetta"), button:has-text("Accept all")');
+            if (await cookieBtn.count() > 0) {
+                await cookieBtn.first().click();
+                await page.waitForTimeout(1000);
+                log.info('  Cookie accettati');
+            }
+        } catch {}
+
         // ── Pagina principale — valida pertinenza ────────────────────────
         if (url === baseUrl || url === baseUrl + '/') {
-            const title = $('meta[property="og:title"]').attr('content')
-                || $('title').text().replace(' | Facebook', '').trim();
-            results.pageTitle  = title;
-            results.isRelevant = isPageRelevant(title);
+            await page.waitForTimeout(2000);
+            const title = await page.title();
+            const ogTitle = await page.$eval(
+                'meta[property="og:title"]',
+                el => el.getAttribute('content')
+            ).catch(() => '');
+
+            const pageTitle = ogTitle || title.replace(' | Facebook', '').trim();
+            results.pageTitle  = pageTitle;
+            results.isRelevant = isPageRelevant(pageTitle);
+
             if (!results.isRelevant) {
-                log.warning(`Non pertinente: "${title}" — stop`);
+                log.warning(`Non pertinente: "${pageTitle}"`);
             } else {
-                log.info(`Valida: "${title}"`);
-                // Aggiungi lista eventi SOLO dopo conferma pertinenza
-                await crawler.addRequests([{ url: eventsUrl }]);
-            }
-            return;
-        }
+                log.info(`Valida: "${pageTitle}"`);
+                // Naviga agli eventi
+                await page.goto(eventsUrl, { waitUntil: 'domcontentloaded' });
+                await page.waitForTimeout(3000);
 
-        // ── Lista eventi ─────────────────────────────────────────────────
-        if (url === eventsUrl || url.endsWith('/events/')) {
-            if (!results.isRelevant) return;
-            const eventLinks = new Set();
-            $('a[href]').each((_, el) => {
-                const href = $(el).attr('href') || '';
-                const match = href.match(/\/events\/(\d+)/);
-                if (match) {
-                    eventLinks.add(`https://www.facebook.com/events/${match[1]}/`);
+                // Scrolla per caricare più eventi
+                for (let i = 0; i < 3; i++) {
+                    await page.evaluate(() => window.scrollBy(0, 800));
+                    await page.waitForTimeout(1000);
                 }
-            });
-            log.info(`  ${eventLinks.size} link eventi trovati`);
-            for (const evUrl of [...eventLinks].slice(0, 50)) {
-                await crawler.addRequests([{ url: evUrl }]);
+
+                // Estrai link eventi dalla pagina
+                const eventLinks = await page.$$eval('a[href]', links =>
+                    links
+                        .map(a => a.href)
+                        .filter(href => /\/events\/\d+/.test(href))
+                        .map(href => {
+                            const match = href.match(/\/events\/(\d+)/);
+                            return match ? `https://www.facebook.com/events/${match[1]}/` : null;
+                        })
+                        .filter(Boolean)
+                );
+
+                const uniqueLinks = [...new Set(eventLinks)];
+                log.info(`  ${uniqueLinks.length} link eventi trovati`);
+
+                // Visita ogni evento e filtra per data
+                for (const evUrl of uniqueLinks.slice(0, 40)) {
+                    if (results.events.length >= maxEvents) break;
+
+                    try {
+                        await page.goto(evUrl, { waitUntil: 'domcontentloaded' });
+                        await page.waitForTimeout(1500);
+
+                        const titolo = await page.$eval(
+                            'meta[property="og:title"]',
+                            el => el.getAttribute('content')
+                        ).catch(() => '');
+
+                        const dataRaw = await page.$eval(
+                            'meta[property="event:start_time"], meta[property="og:event:start_time"]',
+                            el => el.getAttribute('content')
+                        ).catch(() => '');
+
+                        const descr = await page.$eval(
+                            'meta[property="og:description"]',
+                            el => el.getAttribute('content')
+                        ).catch(() => '');
+
+                        const immagine = await page.$eval(
+                            'meta[property="og:image"]',
+                            el => el.getAttribute('content')
+                        ).catch(() => '');
+
+                        if (!titolo || !dataRaw) {
+                            log.info(`  Skip — dati mancanti: ${evUrl}`);
+                            continue;
+                        }
+
+                        if (!isInRange(dataRaw)) {
+                            log.info(`  Skip fuori range: ${titolo} (${dataRaw})`);
+                            continue;
+                        }
+
+                        results.events.push({
+                            url: evUrl, titolo, data: dataRaw,
+                            descr, immagine, comune,
+                        });
+                        log.info(`  ✅ Evento: ${titolo} (${dataRaw})`);
+
+                    } catch (e) {
+                        log.warning(`  Errore evento ${evUrl}: ${e.message}`);
+                    }
+                }
             }
             return;
-        }
-
-        // ── Singolo evento ────────────────────────────────────────────────
-        if (/\/events\/\d+/.test(url)) {
-            if (!results.isRelevant) return;
-            if (results.events.length >= maxEvents) {
-                log.info(`  Limite ${maxEvents} eventi raggiunto — skip`);
-                return;
-            }
-
-            const titolo   = $('meta[property="og:title"]').attr('content') || '';
-            const dataRaw  = $('meta[property="event:start_time"]').attr('content')
-                          || $('meta[property="og:event:start_time"]').attr('content') || '';
-            const descr    = $('meta[property="og:description"]').attr('content') || '';
-            const immagine = $('meta[property="og:image"]').attr('content') || '';
-
-            if (!titolo || !dataRaw) {
-                log.info(`  Skip — dati mancanti`);
-                return;
-            }
-
-            // Filtra per range date
-            if (!isInRange(dataRaw)) {
-                log.info(`  Skip fuori range: ${titolo} (${dataRaw})`);
-                return;
-            }
-
-            results.events.push({
-                url,
-                titolo,
-                data:    dataRaw,
-                descr,
-                immagine,
-                comune,
-            });
-            log.info(`  ✅ Evento: ${titolo} (${dataRaw})`);
         }
     },
 
@@ -162,13 +196,11 @@ const crawler = new CheerioCrawler({
     },
 });
 
-// Avvia SOLO dalla pagina principale — events aggiunto dopo validazione
+// Avvia solo dalla pagina principale
 await crawler.run([{ url: baseUrl }]);
 
 log.info(`\n✅ ${comune}: pertinente=${results.isRelevant} | eventi=${results.events.length}`);
-if (results.events.length > 0) {
-    results.events.forEach(e => log.info(`   - ${e.titolo} (${e.data})`));
-}
+results.events.forEach(e => log.info(`   - ${e.titolo} (${e.data})`));
 
 await Dataset.pushData(results);
 await Actor.exit();
