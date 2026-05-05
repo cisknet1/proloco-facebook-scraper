@@ -1,11 +1,10 @@
 /**
- * ProLoco Facebook Scraper
- * Legge posts ED events da pagina Facebook Pro Loco/Comune
- * Filtra per data e valida pertinenza pagina
+ * ProLoco Facebook Scraper v2
+ * Usa proxy residenziali Apify per bypassare il redirect di Facebook
  */
 
 import { Actor } from 'apify';
-import { CheerioCrawler, Dataset, log } from 'crawlee';
+import { CheerioCrawler, Dataset, log, ProxyConfiguration } from 'crawlee';
 
 await Actor.init();
 
@@ -26,22 +25,16 @@ if (!fbUrl) {
 const cutoffFrom = new Date(fromDate);
 const cutoffTo   = new Date(toDate);
 const comuneLow  = comune.toLowerCase();
+const baseUrl    = fbUrl.replace(/\/$/, '');
+const postsUrl   = baseUrl + '/posts/';
+const eventsUrl  = baseUrl + '/events/';
 
-// URL base senza trailing slash
-const baseUrl   = fbUrl.replace(/\/$/, '');
-const postsUrl  = baseUrl + '/posts/';
-const eventsUrl = baseUrl + '/events/';
-
-log.info(`Scraping: ${baseUrl}`);
-log.info(`Comune: ${comune} | Dal: ${fromDate} | Al: ${toDate}`);
+log.info(`Scraping: ${baseUrl} | Comune: ${comune} | Dal: ${fromDate} | Al: ${toDate}`);
 
 const results = {
-    fbUrl: baseUrl,
-    comune,
-    pageTitle:  '',
-    isRelevant: false,
-    posts:      [],
-    events:     [],
+    fbUrl: baseUrl, comune,
+    pageTitle: '', isRelevant: false,
+    posts: [], events: [],
 };
 
 function parseDate(str) {
@@ -51,50 +44,55 @@ function parseDate(str) {
 
 function isInRange(dateStr) {
     const d = parseDate(dateStr);
-    if (!d) return false;
-    return d >= cutoffFrom && d <= cutoffTo;
+    return d ? d >= cutoffFrom && d <= cutoffTo : false;
 }
 
 function isFuture(dateStr) {
     const d = parseDate(dateStr);
-    if (!d) return false;
-    return d >= new Date();
+    return d ? d >= new Date() : false;
 }
 
 function isPageRelevant(title) {
-    if (!title) return false;
+    if (!title || title === 'Redirecting...') return false;
     const t = title.toLowerCase();
-    const keywords = ['pro loco', 'proloco', 'comune', 'municipio', 'associazione', 'unpli'];
+    const keywords = ['pro loco','proloco','comune','municipio','associazione','unpli'];
     const hasKeyword = keywords.some(k => t.includes(k));
     const comuneWords = comuneLow.split(' ').filter(w => w.length > 3);
     const hasComune = comuneWords.length === 0 || comuneWords.some(w => t.includes(w));
     return hasKeyword || hasComune;
 }
 
+// Proxy residenziale Apify — necessario per Facebook
+const proxyConfig = await Actor.createProxyConfiguration({
+    groups: ['RESIDENTIAL'],
+    countryCode: 'IT',
+});
+
 const crawler = new CheerioCrawler({
+    proxyConfiguration: proxyConfig,
     maxRequestsPerCrawl: 60,
     requestHandlerTimeoutSecs: 30,
-    maxConcurrency: 3,
+    maxConcurrency: 2,
 
     async requestHandler({ $, request }) {
         const url = request.url;
         log.info(`Pagina: ${url}`);
 
-        // Pagina principale — valida pertinenza
+        // Pagina principale
         if (url === baseUrl || url === baseUrl + '/') {
             const title = $('meta[property="og:title"]').attr('content')
                 || $('title').text().replace(' | Facebook', '').trim();
             results.pageTitle  = title;
             results.isRelevant = isPageRelevant(title);
             if (!results.isRelevant) {
-                log.warning(`Pagina non pertinente: "${title}"`);
+                log.warning(`Non pertinente: "${title}"`);
             } else {
-                log.info(`Pagina valida: "${title}"`);
+                log.info(`Valida: "${title}"`);
             }
             return;
         }
 
-        // Pagina /posts/
+        // Posts
         if (url.includes('/posts/') && !url.includes('/events/')) {
             if (!results.isRelevant || results.posts.length >= maxPosts) return;
             const testo    = $('meta[property="og:description"]').attr('content') || '';
@@ -107,7 +105,7 @@ const crawler = new CheerioCrawler({
             return;
         }
 
-        // Pagina /events/ — lista
+        // Lista eventi
         if (url === eventsUrl || url.endsWith('/events/')) {
             if (!results.isRelevant) return;
             const eventLinks = new Set();
@@ -116,7 +114,7 @@ const crawler = new CheerioCrawler({
                 const match = href.match(/\/events\/(\d+)/);
                 if (match) eventLinks.add(`https://www.facebook.com/events/${match[1]}/`);
             });
-            log.info(`  ${eventLinks.size} link eventi trovati`);
+            log.info(`  ${eventLinks.size} link eventi`);
             for (const evUrl of [...eventLinks].slice(0, 30)) {
                 await crawler.addRequests([{ url: evUrl }]);
             }
@@ -152,7 +150,7 @@ await crawler.run([
     { url: eventsUrl },
 ]);
 
-log.info(`✅ ${comune}: pageTitle="${results.pageTitle}" pertinente=${results.isRelevant} posts=${results.posts.length} eventi=${results.events.length}`);
+log.info(`✅ ${comune}: "${results.pageTitle}" pertinente=${results.isRelevant} posts=${results.posts.length} eventi=${results.events.length}`);
 
 await Dataset.pushData(results);
 await Actor.exit();
